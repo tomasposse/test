@@ -1,94 +1,67 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Vanilla WebGL AR Shader</title>
-  <style>
-    html, body { margin:0; height:100%; overflow:hidden; background:black; }
-    canvas { display:block; width:100%; height:100%; }
-    #video { display:none; }
-  </style>
+<meta charset="UTF-8" />
+<title>AR.js + pure WebGL shader sphere</title>
+<style>
+  html, body { margin: 0; overflow: hidden; height: 100%; }
+  canvas { position: absolute; top: 0; left: 0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/jsartoolkit5@5.3.2/build/artoolkit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsartoolkit5@5.3.2/build/artoolkit.api.js"></script>
 </head>
 <body>
-<video id="video" autoplay playsinline muted></video>
-<canvas id="glcanvas"></canvas>
+<video id="video" autoplay playsinline style="display:none;"></video>
+<canvas id="canvas"></canvas>
+
 <script>
-const video = document.getElementById("video");
-const canvas = document.getElementById("glcanvas");
+const canvas = document.getElementById("canvas");
 const gl = canvas.getContext("webgl");
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+gl.viewport(0,0,canvas.width,canvas.height);
 
-function resizeCanvas() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    gl.viewport(0, 0, canvas.width, canvas.height);
-}
-window.addEventListener('resize', resizeCanvas);
-resizeCanvas();
-
-// Setup shaders
 const vsSource = `
-attribute vec4 aPosition;
-varying vec2 vUV;
+attribute vec3 aPosition;
+uniform mat4 uModelViewProj;
+varying vec3 vPosition;
 void main() {
-    vUV = aPosition.xy * 0.5 + 0.5;
-    gl_Position = aPosition;
+  vPosition = aPosition;
+  gl_Position = uModelViewProj * vec4(aPosition, 1.0);
 }
 `;
 
 const fsSource = `
 precision mediump float;
 uniform float uTime;
-uniform sampler2D uVideo;
-varying vec2 vUV;
-
+varying vec3 vPosition;
 void main() {
-    vec2 uv = vUV;
-    vec3 videoColor = texture2D(uVideo, uv).rgb;
-
-    // 2: recursive warps with irrational scales
+    vec2 uv = normalize(vPosition).xy;
     uv += 0.4 * sin(uv*3.0 + uTime);
     uv += 0.25 * cos(uv*7.0 - uTime*0.8);
     uv += 0.12 * sin(uv*11.0 + uTime*1.2);
-
-    // 3: local swirl
     float angle = sin(length(uv)*4.5 - uTime);
     mat2 rot = mat2(cos(angle), -sin(angle), sin(angle), cos(angle));
-    uv = rot * (uv - 0.5) + 0.5;
-
-    // 4: local time
+    uv = rot * uv;
     float localTime = uTime + sin(uv.x*8.0) * cos(uv.y*12.0);
-
-    // 5: multi-scale fields
-    float coarse = sin(5.0*length(uv-0.5) - localTime);
+    float coarse = sin(5.0*length(uv) - localTime);
     float fine = sin(80.0*uv.x + localTime) * cos(90.0*uv.y - localTime);
-
-    // 6: micro fract tear
     float tear = fract(sin(150.0*uv.x*uv.y));
-
-    // 9: separate RGB fields
     float r = sin(coarse + fine + tear + localTime);
     float g = cos(coarse - fine - tear - localTime*1.3);
     float b = sin((coarse*1.2 + fine*0.8 + tear*2.0) - localTime*0.6);
-
-    vec3 shaderColor = 0.5 + 0.5 * vec3(r,g,b);
-
-    // 10: blend shader with camera
-    float mask = smoothstep(1.0, 0.0, length(uv-0.5)*1.5);
-    vec3 color = mix(videoColor, shaderColor, mask);
-
-    gl_FragColor = vec4(color,1.0);
+    gl_FragColor = vec4(0.5 + 0.5 * vec3(r,g,b), 1.0) * smoothstep(1.0, 0.0, length(uv)*0.8);
 }
 `;
 
 function loadShader(type, source) {
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        console.error(gl.getShaderInfoLog(shader));
-        gl.deleteShader(shader);
-    }
-    return shader;
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(shader));
+  }
+  return shader;
 }
 
 const vs = loadShader(gl.VERTEX_SHADER, vsSource);
@@ -100,55 +73,100 @@ gl.attachShader(program, fs);
 gl.linkProgram(program);
 gl.useProgram(program);
 
-// Setup buffer
 const posLoc = gl.getAttribLocation(program, 'aPosition');
+const uMVP = gl.getUniformLocation(program, 'uModelViewProj');
+const uTimeLoc = gl.getUniformLocation(program, 'uTime');
+
+// Build sphere vertices
+function createSphere(radius, latBands, lonBands) {
+  let positions = [];
+  for (let lat=0; lat<=latBands; lat++) {
+    let theta = lat * Math.PI / latBands;
+    let sinTheta = Math.sin(theta);
+    let cosTheta = Math.cos(theta);
+    for (let lon=0; lon<=lonBands; lon++) {
+      let phi = lon * 2 * Math.PI / lonBands;
+      positions.push(
+        radius * sinTheta * Math.cos(phi),
+        radius * cosTheta,
+        radius * sinTheta * Math.sin(phi)
+      );
+    }
+  }
+  let indices = [];
+  for (let lat=0; lat<latBands; lat++) {
+    for (let lon=0; lon<lonBands; lon++) {
+      let first = (lat * (lonBands+1)) + lon;
+      let second = first + lonBands + 1;
+      indices.push(first, second, first+1, second, second+1, first+1);
+    }
+  }
+  return { positions, indices };
+}
+let sphere = createSphere(0.5, 20, 20);
+
 const posBuffer = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-    -1, -1, 1, -1, -1, 1, 1, 1
-]), gl.STATIC_DRAW);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphere.positions), gl.STATIC_DRAW);
+
+const idxBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuffer);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(sphere.indices), gl.STATIC_DRAW);
+
 gl.enableVertexAttribArray(posLoc);
-gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, false, 0, 0);
 
-// Uniforms
-const uTimeLoc = gl.getUniformLocation(program, 'uTime');
-const uVideoLoc = gl.getUniformLocation(program, 'uVideo');
+gl.enable(gl.DEPTH_TEST);
 
-// Setup video texture
-const videoTexture = gl.createTexture();
-gl.bindTexture(gl.TEXTURE_2D, videoTexture);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+// Setup AR.js
+let arController = null;
+let cameraMatrix = mat4.create();
+let markerMatrix = mat4.create();
 
-// Animation loop
-function render(){
-    let time = performance.now() * 0.001;
+navigator.mediaDevices.getUserMedia({video:true}).then(stream => {
+  const video = document.getElementById('video');
+  video.srcObject = stream;
+  video.play();
 
-    // update video texture
-    if (video.readyState >= 2) {
-        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video);
-    }
-
-    gl.uniform1f(uTimeLoc, time);
-    gl.uniform1i(uVideoLoc, 0);
-
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    requestAnimationFrame(render);
-}
-
-// Start camera
-navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
-.then(stream => {
-    video.srcObject = stream;
-    video.play();
-    render();
-})
-.catch(err => {
-    console.error("Camera error:", err);
-    document.body.innerHTML = "<h2 style='color:white'>🚫 Could not start camera:<br>"+err.message+"</h2>";
+  video.addEventListener('loadedmetadata', () => {
+    ARController.initWithVideo(video).then(controller => {
+      arController = controller;
+      arController.loadMarker('Data/patt.hiro', markerId => {
+        controller.trackMarkerId = markerId;
+      });
+      render();
+    });
+  });
 });
+
+function render() {
+  requestAnimationFrame(render);
+  if (!arController) return;
+
+  arController.process();
+  gl.clearColor(0,0,0,0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  let time = performance.now() * 0.001;
+  gl.uniform1f(uTimeLoc, time);
+
+  if (arController.markerNum > 0 && arController.trackMarkerId !== undefined) {
+    let marker = arController.getMarker(arController.trackMarkerId);
+    if (marker) {
+      mat4.fromRotationTranslationScale(markerMatrix,
+        quat.create(), vec3.fromValues(marker.pos[0], marker.pos[1], marker.pos[2]),
+        vec3.fromValues(1,1,1));
+
+      mat4.perspective(cameraMatrix, 45*Math.PI/180, canvas.width/canvas.height, 0.1, 100);
+      let mvp = mat4.create();
+      mat4.multiply(mvp, cameraMatrix, markerMatrix);
+      gl.uniformMatrix4fv(uMVP, false, mvp);
+
+      gl.drawElements(gl.TRIANGLES, sphere.indices.length, gl.UNSIGNED_SHORT, 0);
+    }
+  }
+}
 </script>
+<script src="https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/gl-matrix-min.js"></script>
 </body>
 </html>
