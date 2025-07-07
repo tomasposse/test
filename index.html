@@ -1,33 +1,35 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<title>AR.js + pure WebGL shader sphere</title>
+<meta charset="UTF-8">
+<title>AR.js + WebGL Shader Sphere</title>
 <style>
-  html, body { margin: 0; overflow: hidden; height: 100%; }
-  canvas { position: absolute; top: 0; left: 0; }
+  html, body { margin: 0; overflow: hidden; height: 100%; background: black; }
+  canvas { display: block; }
 </style>
+<!-- load libraries first -->
+<script src="https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/gl-matrix-min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsartoolkit5@5.3.2/build/artoolkit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsartoolkit5@5.3.2/build/artoolkit.api.js"></script>
 </head>
 <body>
 <video id="video" autoplay playsinline style="display:none;"></video>
 <canvas id="canvas"></canvas>
-
 <script>
+window.onload = function() {
 const canvas = document.getElementById("canvas");
 const gl = canvas.getContext("webgl");
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
-gl.viewport(0,0,canvas.width,canvas.height);
+gl.viewport(0, 0, canvas.width, canvas.height);
 
 const vsSource = `
 attribute vec3 aPosition;
-uniform mat4 uModelViewProj;
+uniform mat4 uMVP;
 varying vec3 vPosition;
 void main() {
   vPosition = aPosition;
-  gl_Position = uModelViewProj * vec4(aPosition, 1.0);
+  gl_Position = uMVP * vec4(aPosition, 1.0);
 }
 `;
 
@@ -66,7 +68,6 @@ function loadShader(type, source) {
 
 const vs = loadShader(gl.VERTEX_SHADER, vsSource);
 const fs = loadShader(gl.FRAGMENT_SHADER, fsSource);
-
 const program = gl.createProgram();
 gl.attachShader(program, vs);
 gl.attachShader(program, fs);
@@ -74,26 +75,22 @@ gl.linkProgram(program);
 gl.useProgram(program);
 
 const posLoc = gl.getAttribLocation(program, 'aPosition');
-const uMVP = gl.getUniformLocation(program, 'uModelViewProj');
+const uMVPLoc = gl.getUniformLocation(program, 'uMVP');
 const uTimeLoc = gl.getUniformLocation(program, 'uTime');
 
-// Build sphere vertices
 function createSphere(radius, latBands, lonBands) {
-  let positions = [];
+  let positions = [], indices = [];
   for (let lat=0; lat<=latBands; lat++) {
     let theta = lat * Math.PI / latBands;
-    let sinTheta = Math.sin(theta);
-    let cosTheta = Math.cos(theta);
     for (let lon=0; lon<=lonBands; lon++) {
       let phi = lon * 2 * Math.PI / lonBands;
       positions.push(
-        radius * sinTheta * Math.cos(phi),
-        radius * cosTheta,
-        radius * sinTheta * Math.sin(phi)
+        radius * Math.sin(theta) * Math.cos(phi),
+        radius * Math.cos(theta),
+        radius * Math.sin(theta) * Math.sin(phi)
       );
     }
   }
-  let indices = [];
   for (let lat=0; lat<latBands; lat++) {
     for (let lon=0; lon<lonBands; lon++) {
       let first = (lat * (lonBands+1)) + lon;
@@ -103,6 +100,7 @@ function createSphere(radius, latBands, lonBands) {
   }
   return { positions, indices };
 }
+
 let sphere = createSphere(0.5, 20, 20);
 
 const posBuffer = gl.createBuffer();
@@ -115,24 +113,20 @@ gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(sphere.indices), gl.STATI
 
 gl.enableVertexAttribArray(posLoc);
 gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, false, 0, 0);
-
 gl.enable(gl.DEPTH_TEST);
 
-// Setup AR.js
-let arController = null;
-let cameraMatrix = mat4.create();
-let markerMatrix = mat4.create();
+let arController = null, markerId = null;
 
 navigator.mediaDevices.getUserMedia({video:true}).then(stream => {
   const video = document.getElementById('video');
   video.srcObject = stream;
   video.play();
-
   video.addEventListener('loadedmetadata', () => {
     ARController.initWithVideo(video).then(controller => {
       arController = controller;
-      arController.loadMarker('Data/patt.hiro', markerId => {
-        controller.trackMarkerId = markerId;
+      arController.setPatternDetectionMode('template');
+      arController.loadMarker('https://cdn.jsdelivr.net/gh/AR-js-org/AR.js/three.js/data/patt.hiro', id => {
+        markerId = id;
       });
       render();
     });
@@ -141,8 +135,7 @@ navigator.mediaDevices.getUserMedia({video:true}).then(stream => {
 
 function render() {
   requestAnimationFrame(render);
-  if (!arController) return;
-
+  if (!arController || markerId === null) return;
   arController.process();
   gl.clearColor(0,0,0,0);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -150,23 +143,19 @@ function render() {
   let time = performance.now() * 0.001;
   gl.uniform1f(uTimeLoc, time);
 
-  if (arController.markerNum > 0 && arController.trackMarkerId !== undefined) {
-    let marker = arController.getMarker(arController.trackMarkerId);
-    if (marker) {
-      mat4.fromRotationTranslationScale(markerMatrix,
-        quat.create(), vec3.fromValues(marker.pos[0], marker.pos[1], marker.pos[2]),
-        vec3.fromValues(1,1,1));
-
-      mat4.perspective(cameraMatrix, 45*Math.PI/180, canvas.width/canvas.height, 0.1, 100);
-      let mvp = mat4.create();
-      mat4.multiply(mvp, cameraMatrix, markerMatrix);
-      gl.uniformMatrix4fv(uMVP, false, mvp);
-
-      gl.drawElements(gl.TRIANGLES, sphere.indices.length, gl.UNSIGNED_SHORT, 0);
-    }
+  let marker = arController.getMarker(markerId);
+  if (marker && marker.cf > 0.7) {
+    let mvp = mat4.create();
+    let proj = mat4.perspective(mat4.create(), 45*Math.PI/180, canvas.width/canvas.height, 0.1, 100);
+    let trans = arController.getTransMatSquareCont(marker, 1, marker.history ? marker.history : []);
+    let model = mat4.fromValues(...trans);
+    mat4.transpose(model, model); // artoolkit gives column-major
+    mat4.multiply(mvp, proj, model);
+    gl.uniformMatrix4fv(uMVPLoc, false, mvp);
+    gl.drawElements(gl.TRIANGLES, sphere.indices.length, gl.UNSIGNED_SHORT, 0);
   }
 }
+};
 </script>
-<script src="https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/gl-matrix-min.js"></script>
 </body>
 </html>
